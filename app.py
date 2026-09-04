@@ -23,7 +23,9 @@ def translate_endpoint():
     translation = load_model.translate(sentences=sentences,
                                        src_lang=base_lang,
                                        tgt_lang=dest_lang)
-    return jsonify(translation)
+    response = jsonify(translation)
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
+    return response
 
 @app.route("/health", methods=["GET"])
 def health():
