@@ -1,8 +1,10 @@
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 import torch
+import os
+import re
 
 # Model data
-_MODEL_NAME = "google/madlad400-3b-mt"
+_MODEL_NAME = "tencent/Hy-MT2-1.8B"
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Some models have different codes
@@ -26,11 +28,41 @@ _LANG_CODE_MAP = {
 # Batching data
 _BATCH_SIZE = 16
 
+# Token data
+_LENGTH_MULTIPLIER = {"hu": 3.0, "tr": 3.0}
+_DEFAULT_LENGTH_MULTIPLIER = 2.0
+_MIN_NEW_TOKENS = 10
+_OVERFLOW_MULTIPLIER = 2.0
+_MAX_RETRY_NEW_TOKENS = 512
+
+# Regex to find dialogue markups like -> #$b# $h#$b#
+_MARKUP_RE = re.compile(r"(?:\$[a-zA-Z]|#)+")
+
 # Load model
 print(f"Loading {_MODEL_NAME} onto {_DEVICE} ...")
 _tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
 _model = AutoModelForSeq2SeqLM.from_pretrained(_MODEL_NAME).to(_DEVICE)
 _model.eval()
+
+# Quantizing model
+if _DEVICE == "cpu":
+    torch.set_num_threads(os.cpu_count())
+    _model = torch.quantization.quantize_dynamic(
+        _model, {torch.nn.Linear}, dtype=torch.qint8
+    )
+
+def _split_markup(text):
+    """Split text into a list of (is_markup, chunk)"""
+    pieces = []
+    pos = 0
+    for m in _MARKUP_RE.finditer(text):
+        if m.start() > pos:
+            pieces.append((False, text[pos:m.start()]))
+        pieces.append((True, m.group()))
+        pos = m.end()
+    if pos < len(text):
+        pieces.append((False, text[pos:]))
+    return pieces
 
 def _lang_choice(code):
     """Language from _LANG_CODE_MAP"""
@@ -47,17 +79,53 @@ def _batch_generation(batch_sentences, tgt_lang):
 
     # Output as PyTorch + keep padding=True
     inputs = _tokenizer(tagged_sentences, return_tensors="pt", padding=True).to(_DEVICE)
+
+    # Token length
+    max_input_len = inputs["input_ids"].shape[1]
+    multiplier = _LENGTH_MULTIPLIER.get(tgt_lang, _DEFAULT_LENGTH_MULTIPLIER)
+    max_new_tokens = max(_MIN_NEW_TOKENS, int(max_input_len * multiplier))
+
+    # Translation
     output_ids = _model.generate(**inputs, 
                                 num_beams=1,
-                                no_repeat_ngram_size=3)
-    
-    return _tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+                                no_repeat_ngram_size=3,
+                                max_new_tokens=max_new_tokens)
+    translations = _tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+
+    # Overflow
+    eos_id = _tokenizer.eos_token_id
+    for i, row in enumerate(output_ids):
+        if eos_id is not None and eos_id in row.tolist():
+            continue
+
+        # Retry for big dialogues
+        retry_cap = min(_MAX_RETRY_NEW_TOKENS, int(max_new_tokens * _OVERFLOW_MULTIPLIER))
+        retry_inputs = _tokenizer([tagged_sentences[i]], return_tensors="pt", padding=True).to(_DEVICE)
+        retry_ids = _model.generate(**retry_inputs,
+                                    num_beams=1,
+                                    no_repeat_ngram_size=3,
+                                    max_new_tokens=retry_cap)
+        translations[i] = _tokenizer.batch_decode(retry_ids, skip_special_tokens=True)[0]
+    return translations
 
 @torch.no_grad()
-def translate(sentences, src_lang="en", tgt_lang="fr"):
+def translate(sentences, src_lang="en", tgt_lang="ru"):
     """Translate a list of sentences."""
+    # Split every sentence
+    split = [_split_markup(sentence) for sentence in sentences]
+ 
+    # Flatten translatable text
+    flat_sentences = []
+    origin = []
+    for s_idx, pieces in enumerate(split):
+        for p_idx, (is_markup, chunk) in enumerate(pieces):
+            if not is_markup and chunk.strip():
+                flat_sentences.append(chunk)
+                origin.append((s_idx, p_idx))
+
+
     # Cluster by legth
-    indexed = sorted(enumerate(sentences), key=lambda pair: len(pair[1]))
+    indexed = sorted(enumerate(flat_sentences), key=lambda pair: len(pair[1]))
 
     # Translate batches
     sorded_translations = []
@@ -67,10 +135,14 @@ def translate(sentences, src_lang="en", tgt_lang="fr"):
         sorded_translations.extend(_batch_generation(part_word, tgt_lang))
 
     # Revert to input order
-    res = [None] * len(sentences)
+    res = [None] * len(flat_sentences)
     for (index, _), translated in zip(indexed, sorded_translations):
         res[index] = translated
-    return res
+
+    # Put back markup
+    for flat_idx, (s_idx, p_idx) in enumerate(origin):
+        split[s_idx][p_idx] = (False, res[flat_idx])
+    return ["".join(chunk for _, chunk in pieces) for pieces in split]
 
 def _debug_translate(path, lang = "ru"):
     """For translation debuging"""
