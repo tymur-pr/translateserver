@@ -16,8 +16,8 @@ def translate_endpoint():
                        400)
 
     # Set lang
-    base_lang = request.args.get("src_lang", "eng_Latn")
-    dest_lang = request.args.get("tgt_lang", "fra_Latn")
+    base_lang = request.args.get("src_lang", "en")
+    dest_lang = request.args.get("tgt_lang", "de")
 
     # load model
     translation = load_model.translate(sentences=sentences,

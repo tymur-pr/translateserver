@@ -1,11 +1,12 @@
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoTokenizer
+from optimum.onnxruntime import ORTModelForSeq2SeqLM
 import torch
-import os
 import re
+from pathlib import Path
 
 # Model data
-_MODEL_NAME = "tencent/Hy-MT2-1.8B"
-_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_MODEL_NAME = str(Path(__file__).resolve().parent / "quantized_model")
+_DEVICE = "cpu"
 
 # Some models have different codes
 _LANG_CODE_MAP = {
@@ -15,6 +16,7 @@ _LANG_CODE_MAP = {
     "pt": "pt",
     "pt-BR": "pt",
     "ru": "ru",
+    "uk": "uk",
     "ja": "ja",
     "zh": "zh",
     "zh-CN": "zh",
@@ -38,18 +40,10 @@ _MAX_RETRY_NEW_TOKENS = 512
 # Regex to find dialogue markups like -> #$b# $h#$b#
 _MARKUP_RE = re.compile(r"(?:\$[a-zA-Z]|#)+")
 
-# Load model
+# Load quantized model
 print(f"Loading {_MODEL_NAME} onto {_DEVICE} ...")
-_tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME)
-_model = AutoModelForSeq2SeqLM.from_pretrained(_MODEL_NAME).to(_DEVICE)
-_model.eval()
-
-# Quantizing model
-if _DEVICE == "cpu":
-    torch.set_num_threads(os.cpu_count())
-    _model = torch.quantization.quantize_dynamic(
-        _model, {torch.nn.Linear}, dtype=torch.qint8
-    )
+_tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME, local_files_only=True)
+_model = ORTModelForSeq2SeqLM.from_pretrained(_MODEL_NAME, provider="CPUExecutionProvider", local_files_only=True)
 
 def _split_markup(text):
     """Split text into a list of (is_markup, chunk)"""
@@ -102,14 +96,14 @@ def _batch_generation(batch_sentences, tgt_lang):
         retry_cap = min(_MAX_RETRY_NEW_TOKENS, int(max_new_tokens * _OVERFLOW_MULTIPLIER))
         retry_inputs = _tokenizer([tagged_sentences[i]], return_tensors="pt", padding=True).to(_DEVICE)
         retry_ids = _model.generate(**retry_inputs,
-                                    num_beams=1,
+                                    num_beams=2,
                                     no_repeat_ngram_size=3,
                                     max_new_tokens=retry_cap)
         translations[i] = _tokenizer.batch_decode(retry_ids, skip_special_tokens=True)[0]
     return translations
 
 @torch.no_grad()
-def translate(sentences, src_lang="en", tgt_lang="ru"):
+def translate(sentences, src_lang="en", tgt_lang="de"):
     """Translate a list of sentences."""
     # Split every sentence
     split = [_split_markup(sentence) for sentence in sentences]
@@ -144,11 +138,12 @@ def translate(sentences, src_lang="en", tgt_lang="ru"):
         split[s_idx][p_idx] = (False, res[flat_idx])
     return ["".join(chunk for _, chunk in pieces) for pieces in split]
 
-def _debug_translate(path, lang = "ru"):
+def _debug_translate(path, lang = "de"):
     """For translation debuging"""
     import json5
     with open(path, "r", encoding="utf-8") as file:
         data = json5.load(file)
+    print(data)
     print(translate(list(data.values()),tgt_lang = lang))
 
 if __name__ == "__main__":

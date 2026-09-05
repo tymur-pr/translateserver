@@ -2,4 +2,6 @@
 venv/
 __pycache__/
 *.pyc
-*.json
+default.json
+onnx_model/
+quantized_model/
