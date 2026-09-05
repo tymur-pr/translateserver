@@ -29,6 +29,7 @@ _model = AutoModelForSeq2SeqLM.from_pretrained(_MODEL_NAME).to(_DEVICE)
 _model.eval()
 
 def _lang_choice(code):
+    """Language from _LANG_CODE_MAP"""
     try:
         return _LANG_CODE_MAP[code]
     except KeyError:
@@ -44,9 +45,26 @@ def translate(sentences, src_lang="en", tgt_lang="fr"):
     inputs = _tokenizer(sentences, return_tensors="pt", padding=True).to(_DEVICE)
     forced_bos_token_id = _tokenizer.convert_tokens_to_ids(_lang_choice(tgt_lang))
     output_ids = _model.generate(**inputs, 
-                                 forced_bos_token_id=forced_bos_token_id,
-                                 num_beams=4,
-                                 no_repeat_ngram_size=3)
+                                forced_bos_token_id=forced_bos_token_id,
+                                num_beams=2,
+                                no_repeat_ngram_size=3)
     return _tokenizer.batch_decode(output_ids, skip_special_tokens=True)
 
-print(translate(["A gentle, sweet breakfast with the warm aroma of butter and maple."],tgt_lang="ru"))
+def _debug_translate(path, lang = "ru"):
+    """For translation debuging"""
+    import json5
+    with open(path, "r", encoding="utf-8") as file:
+        data = json5.load(file)
+    print(translate(list(data.values()),tgt_lang = lang))
+
+if __name__ == "__main__":
+    # Time benchmarking
+    import time
+    start_time = time.perf_counter()
+
+    _debug_translate("default.json", lang="ru")
+
+    end_time = time.perf_counter()
+    execution_time = end_time - start_time
+
+    print(f"Execution Time: {execution_time:.4f}")
