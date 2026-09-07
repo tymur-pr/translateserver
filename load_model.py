@@ -6,6 +6,10 @@ from pathlib import Path
 import threading
 import lang_dict
 
+# Language data
+_SRC_LANG = "en" # From which language
+_DST_LANG = "de" # To which language
+
 # Model data
 _MODEL_NAME = str(Path(__file__).resolve().parent / "quantized_model")
 _DEVICE = "cpu"
@@ -32,7 +36,7 @@ print(f"Loading {_MODEL_NAME} onto {_DEVICE} ...")
 _tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME, local_files_only=True)
 _model = ORTModelForSeq2SeqLM.from_pretrained(_MODEL_NAME, provider="CPUExecutionProvider", local_files_only=True)
 
-def translate_npc_data(value, translate_fn, src_lang="en", tgt_lang="de"):
+def translate_npc_data(value, translate_fn, src_lang=_SRC_LANG, tgt_lang=_DST_LANG):
     """Translate NPC_Data Name is never translated."""
     pairs = _NPC_RELATION_RE.findall(value)
     if not pairs:
@@ -123,7 +127,7 @@ def _batch_generation(batch_sentences, src_lang, tgt_lang):
     return translations
 
 @torch.no_grad()
-def translate(sentences, src_lang="en", tgt_lang="de"):
+def translate(sentences, src_lang=_SRC_LANG, tgt_lang=_DST_LANG):
     """Translate a list of sentences."""
     # Split every sentence
     split = [_split_markup(sentence) for sentence in sentences]
@@ -158,7 +162,7 @@ def translate(sentences, src_lang="en", tgt_lang="de"):
         split[s_idx][p_idx] = (False, res[flat_idx])
     return ["".join(chunk for _, chunk in pieces) for pieces in split]
 
-def _debug_translate(path, lang = "de"):
+def _debug_translate(path, src_lang = _SRC_LANG, tgt_lang = _DST_LANG):
     """For translation debuging"""
     _NPC_KEY_RE = re.compile(r"^NPC[._]Data\.")
     import json5
@@ -168,8 +172,8 @@ def _debug_translate(path, lang = "de"):
     npc_keys = [k for k in data if _NPC_KEY_RE.match(k)]
     plain_keys = [k for k in data if k not in npc_keys]
 
-    plain_translations = translate([data[k] for k in plain_keys], tgt_lang=lang)
-    npc_translations = [translate_npc_data(data[k], translate, tgt_lang=lang) for k in npc_keys]
+    plain_translations = translate([data[k] for k in plain_keys], src_lang=src_lang, tgt_lang=tgt_lang)
+    npc_translations = [translate_npc_data(data[k], translate, src_lang=src_lang, tgt_lang=tgt_lang) for k in npc_keys]
 
     result = dict(zip(npc_keys, npc_translations))
     result.update(zip(plain_keys, plain_translations))
@@ -184,7 +188,7 @@ if __name__ == "__main__":
     start_time = time.perf_counter()
 
     output_lang = "de"
-    result = _debug_translate("default.json", lang=output_lang)
+    result = _debug_translate("default.json", tgt_lang=output_lang)
 
     end_time = time.perf_counter()
     execution_time = end_time - start_time

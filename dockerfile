@@ -6,7 +6,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py helpers.py load_model.py ./
+COPY app.py helpers.py load_model.py lang_dict.py ./
 COPY quantized_model ./quantized_model
 
 EXPOSE 5001

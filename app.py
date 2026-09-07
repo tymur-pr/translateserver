@@ -15,14 +15,20 @@ def translate_endpoint():
         return jsonify(({"error": "Request body must be a JSON list of sentences."}), 
                        400)
 
-    # Set lang
+    # Set language
     base_lang = request.args.get("src_lang", "en")
-    dest_lang = request.args.get("tgt_lang", "de")
+    dest_lang = request.args.get("tgt_lang")
 
-    # load model
-    translation = load_model.translate(sentences=sentences,
-                                       src_lang=base_lang,
-                                       tgt_lang=dest_lang)
+    if not dest_lang:
+        return jsonify({"error": "tgt_lang query parameter is required."}), 400
+
+    try:
+        translation = load_model.translate(sentences=sentences,
+                                           src_lang=base_lang,
+                                           tgt_lang=dest_lang)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
     response = jsonify(translation)
     response.headers["Content-Type"] = "application/json; charset=utf-8"
     return response
