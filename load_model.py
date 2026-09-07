@@ -4,27 +4,11 @@ import torch
 import re
 from pathlib import Path
 import threading
+import lang_dict
 
 # Model data
 _MODEL_NAME = str(Path(__file__).resolve().parent / "quantized_model")
 _DEVICE = "cpu"
-
-# Some models have different codes
-_LANG_CODE_MAP = {
-    "en": "eng_Latn",
-    "de": "deu_Latn",
-    "es": "spa_Latn",
-    "pt": "por_Latn",
-    "ru": "rus_Cyrl",
-    "uk": "ukr_Cyrl",
-    "ja": "jpn_Jpan",
-    "zh": "zho_Hans",
-    "fr": "fra_Latn",
-    "it": "ita_Latn",
-    "ko": "kor_Hang",
-    "tr": "tur_Latn",
-    "hu": "hun_Latn",
-}
 
 # Batching data
 _BATCH_SIZE = 16
@@ -68,7 +52,9 @@ def translate_npc_data(value, translate_fn, src_lang="en", tgt_lang="de"):
         if not label.strip():
             parts.append(f"{name} ''")
         else:
-            new_label = next(translated).strip().replace(" ", "_")
+            new_label = next(translated).strip()
+            new_label = new_label.rstrip(".,!?;: ")
+            new_label = new_label.replace(" ", "_")
             parts.append(f"{name} '{new_label}'")
     return " ".join(parts)
 
@@ -88,9 +74,9 @@ def _split_markup(text):
 def _lang_choice(code):
     """Language from _LANG_CODE_MAP"""
     try:
-        return _LANG_CODE_MAP[code]
+        return lang_dict._LANG_CODE_MAP[code]
     except KeyError:
-        raise ValueError(f"Unsuported code {code}, suported codes {_LANG_CODE_MAP}")
+        raise ValueError(f"Unsuported code {code}, suported codes {lang_dict._LANG_CODE_MAP}")
 
 _tokenizer_lock = threading.Lock()
 def _batch_generation(batch_sentences, src_lang, tgt_lang):
@@ -112,7 +98,7 @@ def _batch_generation(batch_sentences, src_lang, tgt_lang):
     # Translation
     output_ids = _model.generate(**inputs,
                             forced_bos_token_id=forced_bos_token_id,
-                            num_beams=1,
+                            num_beams=2,
                             no_repeat_ngram_size=3,
                             max_new_tokens=max_new_tokens)
     translations = _tokenizer.batch_decode(output_ids, skip_special_tokens=True)
@@ -185,19 +171,25 @@ def _debug_translate(path, lang = "de"):
     plain_translations = translate([data[k] for k in plain_keys], tgt_lang=lang)
     npc_translations = [translate_npc_data(data[k], translate, tgt_lang=lang) for k in npc_keys]
 
-    result = dict(zip(plain_keys, plain_translations))
-    result.update(zip(npc_keys, npc_translations))
+    result = dict(zip(npc_keys, npc_translations))
+    result.update(zip(plain_keys, plain_translations))
 
     print({k: result[k] for k in data})
+    return result
 
 if __name__ == "__main__":
     # Time benchmarking
     import time
+    import json5
     start_time = time.perf_counter()
 
-    _debug_translate("default.json", lang="ru")
+    output_lang = "de"
+    result = _debug_translate("default.json", lang=output_lang)
 
     end_time = time.perf_counter()
     execution_time = end_time - start_time
 
     print(f"Execution Time: {execution_time:.4f}")
+
+    with open(f"{output_lang}.json", "w",encoding="utf-8") as file:
+        json5.dump(result,file,indent=4, quote_keys=True,ensure_ascii=False)
