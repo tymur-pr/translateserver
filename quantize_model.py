@@ -5,7 +5,7 @@ from optimum.onnxruntime import ORTModelForSeq2SeqLM, ORTQuantizer
 from optimum.onnxruntime.configuration import AutoQuantizationConfig
 from transformers import AutoTokenizer
 
-MODEL_NAME = "google/madlad400-3b-mt"
+MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
 EXPORT_DIR = Path("./onnx_model")
 QUANTIZED_DIR = Path("./quantized_model")
 

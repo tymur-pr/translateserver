@@ -3,6 +3,7 @@ from optimum.onnxruntime import ORTModelForSeq2SeqLM
 import torch
 import re
 from pathlib import Path
+import threading
 
 # Model data
 _MODEL_NAME = str(Path(__file__).resolve().parent / "quantized_model")
@@ -10,21 +11,19 @@ _DEVICE = "cpu"
 
 # Some models have different codes
 _LANG_CODE_MAP = {
-    "en": "en",
-    "de": "de",
-    "es": "es",
-    "pt": "pt",
-    "pt-BR": "pt",
-    "ru": "ru",
-    "uk": "uk",
-    "ja": "ja",
-    "zh": "zh",
-    "zh-CN": "zh",
-    "fr": "fr",
-    "it": "it",
-    "ko": "ko",
-    "tr": "tr",
-    "hu": "hu",
+    "en": "eng_Latn",
+    "de": "deu_Latn",
+    "es": "spa_Latn",
+    "pt": "por_Latn",
+    "ru": "rus_Cyrl",
+    "uk": "ukr_Cyrl",
+    "ja": "jpn_Jpan",
+    "zh": "zho_Hans",
+    "fr": "fra_Latn",
+    "it": "ita_Latn",
+    "ko": "kor_Hang",
+    "tr": "tur_Latn",
+    "hu": "hun_Latn",
 }
 
 # Batching data
@@ -38,12 +37,40 @@ _OVERFLOW_MULTIPLIER = 2.0
 _MAX_RETRY_NEW_TOKENS = 512
 
 # Regex to find dialogue markups like -> #$b# $h#$b#
-_MARKUP_RE = re.compile(r"(?:\$[a-zA-Z]|#)+")
+_MARKUP_RE = re.compile(r"(?:\$[a-zA-Z0-9]|#|\+\+)+")
+
+# Regex to find NPC data relationships like ->
+# "NPC.Data.Kiarra": "Anton 'brother_Anton' Lorenzo 'oldest_brother_Lorenzo'",
+_NPC_RELATION_RE = re.compile(r"(\S+) '([^']*)'")
 
 # Load quantized model
 print(f"Loading {_MODEL_NAME} onto {_DEVICE} ...")
 _tokenizer = AutoTokenizer.from_pretrained(_MODEL_NAME, local_files_only=True)
 _model = ORTModelForSeq2SeqLM.from_pretrained(_MODEL_NAME, provider="CPUExecutionProvider", local_files_only=True)
+
+def translate_npc_data(value, translate_fn, src_lang="en", tgt_lang="de"):
+    """Translate NPC_Data Name is never translated."""
+    pairs = _NPC_RELATION_RE.findall(value)
+    if not pairs:
+        return value 
+
+    # Underscores to spaces
+    labels_to_translate = [label.replace("_", " ") for _, label in pairs if label.strip()]
+    if labels_to_translate:
+        translated_labels = translate_fn(labels_to_translate, src_lang=src_lang, tgt_lang=tgt_lang)
+    else:
+        translated_labels = []
+    translated = iter(translated_labels)
+
+    # Place _ in place
+    parts = []
+    for name, label in pairs:
+        if not label.strip():
+            parts.append(f"{name} ''")
+        else:
+            new_label = next(translated).strip().replace(" ", "_")
+            parts.append(f"{name} '{new_label}'")
+    return " ".join(parts)
 
 def _split_markup(text):
     """Split text into a list of (is_markup, chunk)"""
@@ -65,14 +92,17 @@ def _lang_choice(code):
     except KeyError:
         raise ValueError(f"Unsuported code {code}, suported codes {_LANG_CODE_MAP}")
 
-def _batch_generation(batch_sentences, tgt_lang):
+_tokenizer_lock = threading.Lock()
+def _batch_generation(batch_sentences, src_lang, tgt_lang):
     """Translate a single batch of sentences."""
     # Set language
+    src_code = _lang_choice(src_lang)
     tgt_code = _lang_choice(tgt_lang)
-    tagged_sentences = [f"<2{tgt_code}> {sentence}" for sentence in batch_sentences]
 
-    # Output as PyTorch + keep padding=True
-    inputs = _tokenizer(tagged_sentences, return_tensors="pt", padding=True).to(_DEVICE)
+    with _tokenizer_lock:
+        _tokenizer.src_lang = src_code
+        inputs = _tokenizer(batch_sentences, return_tensors="pt", padding=True).to(_DEVICE)
+        forced_bos_token_id = _tokenizer.convert_tokens_to_ids(tgt_code)
 
     # Token length
     max_input_len = inputs["input_ids"].shape[1]
@@ -80,10 +110,11 @@ def _batch_generation(batch_sentences, tgt_lang):
     max_new_tokens = max(_MIN_NEW_TOKENS, int(max_input_len * multiplier))
 
     # Translation
-    output_ids = _model.generate(**inputs, 
-                                num_beams=1,
-                                no_repeat_ngram_size=3,
-                                max_new_tokens=max_new_tokens)
+    output_ids = _model.generate(**inputs,
+                            forced_bos_token_id=forced_bos_token_id,
+                            num_beams=1,
+                            no_repeat_ngram_size=3,
+                            max_new_tokens=max_new_tokens)
     translations = _tokenizer.batch_decode(output_ids, skip_special_tokens=True)
 
     # Overflow
@@ -94,8 +125,11 @@ def _batch_generation(batch_sentences, tgt_lang):
 
         # Retry for big dialogues
         retry_cap = min(_MAX_RETRY_NEW_TOKENS, int(max_new_tokens * _OVERFLOW_MULTIPLIER))
-        retry_inputs = _tokenizer([tagged_sentences[i]], return_tensors="pt", padding=True).to(_DEVICE)
+        with _tokenizer_lock:
+            _tokenizer.src_lang = src_code
+            retry_inputs = _tokenizer([batch_sentences[i]], return_tensors="pt", padding=True).to(_DEVICE)
         retry_ids = _model.generate(**retry_inputs,
+                                    forced_bos_token_id=forced_bos_token_id,
                                     num_beams=2,
                                     no_repeat_ngram_size=3,
                                     max_new_tokens=retry_cap)
@@ -107,7 +141,7 @@ def translate(sentences, src_lang="en", tgt_lang="de"):
     """Translate a list of sentences."""
     # Split every sentence
     split = [_split_markup(sentence) for sentence in sentences]
- 
+
     # Flatten translatable text
     flat_sentences = []
     origin = []
@@ -126,7 +160,7 @@ def translate(sentences, src_lang="en", tgt_lang="de"):
     for pos in range(0, len(indexed), _BATCH_SIZE):
         part = indexed[pos : pos + _BATCH_SIZE]
         part_word = [sentence for _, sentence in part]
-        sorded_translations.extend(_batch_generation(part_word, tgt_lang))
+        sorded_translations.extend(_batch_generation(part_word, src_lang, tgt_lang))
 
     # Revert to input order
     res = [None] * len(flat_sentences)
@@ -140,11 +174,21 @@ def translate(sentences, src_lang="en", tgt_lang="de"):
 
 def _debug_translate(path, lang = "de"):
     """For translation debuging"""
+    _NPC_KEY_RE = re.compile(r"^NPC[._]Data\.")
     import json5
     with open(path, "r", encoding="utf-8") as file:
         data = json5.load(file)
-    print(data)
-    print(translate(list(data.values()),tgt_lang = lang))
+
+    npc_keys = [k for k in data if _NPC_KEY_RE.match(k)]
+    plain_keys = [k for k in data if k not in npc_keys]
+
+    plain_translations = translate([data[k] for k in plain_keys], tgt_lang=lang)
+    npc_translations = [translate_npc_data(data[k], translate, tgt_lang=lang) for k in npc_keys]
+
+    result = dict(zip(plain_keys, plain_translations))
+    result.update(zip(npc_keys, npc_translations))
+
+    print({k: result[k] for k in data})
 
 if __name__ == "__main__":
     # Time benchmarking
